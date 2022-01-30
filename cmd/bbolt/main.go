@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"runtime"
@@ -1364,7 +1363,7 @@ func (cmd *BenchCommand) ParseFlags(args []string) (*BenchOptions, error) {
 
 	// Generate temp path if one is not passed in.
 	if options.Path == "" {
-		f, err := ioutil.TempFile("", "bolt-bench-")
+		f, err := os.CreateTemp("", "bolt-bench-")
 		if err != nil {
 			return nil, fmt.Errorf("temp file: %s", err)
 		}
@@ -1951,7 +1950,7 @@ func newCompactCommand(m *Main) *CompactCommand {
 func (cmd *CompactCommand) Run(args ...string) (err error) {
 	// Parse flags.
 	fs := flag.NewFlagSet("", flag.ContinueOnError)
-	fs.SetOutput(ioutil.Discard)
+	fs.SetOutput(io.Discard)
 	fs.StringVar(&cmd.DstPath, "o", "", "")
 	fs.Int64Var(&cmd.TxMaxSize, "tx-max-size", 65536, "")
 	if err := fs.Parse(args); err == flag.ErrHelp {
@@ -1979,7 +1978,7 @@ func (cmd *CompactCommand) Run(args ...string) (err error) {
 	initialSize := fi.Size()
 
 	// Open source database.
-	src, err := bolt.Open(cmd.SrcPath, 0444, nil)
+	src, err := bolt.Open(cmd.SrcPath, 0444, &bolt.Options{ReadOnly: true})
 	if err != nil {
 		return err
 	}
