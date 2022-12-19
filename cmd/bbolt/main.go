@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -63,6 +64,9 @@ var (
 
 // PageHeaderSize represents the size of the bolt.page header.
 const PageHeaderSize = 16
+
+// Represents a marker value to indicate that a file (meta page) is a Bolt DB.
+const magic uint32 = 0xED0CDAED
 
 func main() {
 	m := NewMain()
@@ -334,7 +338,7 @@ func (cmd *DumpCommand) Run(args ...string) error {
 	}
 
 	// Read page ids.
-	pageIDs, err := atois(fs.Args()[1:])
+	pageIDs, err := stringToPages(fs.Args()[1:])
 	if err != nil {
 		return err
 	} else if len(pageIDs) == 0 {
@@ -342,7 +346,7 @@ func (cmd *DumpCommand) Run(args ...string) error {
 	}
 
 	// Open database to retrieve page size.
-	pageSize, err := ReadPageSize(path)
+	pageSize, _, err := ReadPageAndHWMSize(path)
 	if err != nil {
 		return err
 	}
@@ -362,7 +366,7 @@ func (cmd *DumpCommand) Run(args ...string) error {
 		}
 
 		// Print page to stdout.
-		if err := cmd.PrintPage(cmd.Stdout, f, pageID, pageSize); err != nil {
+		if err := cmd.PrintPage(cmd.Stdout, f, pageID, uint64(pageSize)); err != nil {
 			return err
 		}
 	}
@@ -371,22 +375,22 @@ func (cmd *DumpCommand) Run(args ...string) error {
 }
 
 // PrintPage prints a given page as hexadecimal.
-func (cmd *DumpCommand) PrintPage(w io.Writer, r io.ReaderAt, pageID int, pageSize int) error {
+func (cmd *DumpCommand) PrintPage(w io.Writer, r io.ReaderAt, pageID uint64, pageSize uint64) error {
 	const bytesPerLineN = 16
 
 	// Read page into buffer.
 	buf := make([]byte, pageSize)
-	addr := pageID * pageSize
+	addr := pageID * uint64(pageSize)
 	if n, err := r.ReadAt(buf, int64(addr)); err != nil {
 		return err
-	} else if n != pageSize {
+	} else if uint64(n) != pageSize {
 		return io.ErrUnexpectedEOF
 	}
 
 	// Write out to writer in 16-byte lines.
 	var prev []byte
 	var skipped bool
-	for offset := 0; offset < pageSize; offset += bytesPerLineN {
+	for offset := uint64(0); offset < pageSize; offset += bytesPerLineN {
 		// Retrieve current 16-byte line.
 		line := buf[offset : offset+bytesPerLineN]
 		isLastLine := (offset == (pageSize - bytesPerLineN))
@@ -476,13 +480,13 @@ func (cmd *PageItemCommand) Run(args ...string) error {
 	}
 
 	// Read page id.
-	pageID, err := strconv.Atoi(fs.Arg(1))
+	pageID, err := strconv.ParseUint(fs.Arg(1), 10, 64)
 	if err != nil {
 		return err
 	}
 
 	// Read item id.
-	itemID, err := strconv.Atoi(fs.Arg(2))
+	itemID, err := strconv.ParseUint(fs.Arg(2), 10, 64)
 	if err != nil {
 		return err
 	}
@@ -527,29 +531,41 @@ func (cmd *PageItemCommand) leafPageElement(pageBytes []byte, index uint16) (*le
 	return p.leafPageElement(index), nil
 }
 
-// writeBytes writes the byte to the writer. Supported formats: ascii-encoded, hex, bytes.
-func (cmd *PageItemCommand) writeBytes(w io.Writer, b []byte, format string) error {
+// formatBytes converts bytes into string according to format.
+// Supported formats: ascii-encoded, hex, bytes.
+func formatBytes(b []byte, format string) (string, error) {
 	switch format {
 	case "ascii-encoded":
-		_, err := fmt.Fprintf(w, "%q", b)
-		if err != nil {
-			return err
-		}
-		_, err = fmt.Fprintf(w, "\n")
-		return err
+		return fmt.Sprintf("%q", b), nil
 	case "hex":
-		_, err := fmt.Fprintf(w, "%x", b)
-		if err != nil {
-			return err
-		}
-		_, err = fmt.Fprintf(w, "\n")
-		return err
+		return fmt.Sprintf("%x", b), nil
 	case "bytes":
-		_, err := w.Write(b)
-		return err
+		return string(b), nil
 	default:
-		return fmt.Errorf("writeBytes: unsupported format: %s", format)
+		return "", fmt.Errorf("formatBytes: unsupported format: %s", format)
 	}
+}
+
+func parseBytes(str string, format string) ([]byte, error) {
+	switch format {
+	case "ascii-encoded":
+		return []byte(str), nil
+	case "hex":
+		return hex.DecodeString(str)
+	default:
+		return nil, fmt.Errorf("parseBytes: unsupported format: %s", format)
+	}
+}
+
+// writelnBytes writes the byte to the writer. Supported formats: ascii-encoded, hex, bytes.
+// Terminates the write with a new line symbol;
+func writelnBytes(w io.Writer, b []byte, format string) error {
+	str, err := formatBytes(b, format)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(w, str)
+	return err
 }
 
 // PrintLeafItemKey writes the bytes of a leaf element's key.
@@ -558,7 +574,7 @@ func (cmd *PageItemCommand) PrintLeafItemKey(w io.Writer, pageBytes []byte, inde
 	if err != nil {
 		return err
 	}
-	return cmd.writeBytes(w, e.key(), format)
+	return writelnBytes(w, e.key(), format)
 }
 
 // PrintLeafItemKey writes the bytes of a leaf element's value.
@@ -567,7 +583,7 @@ func (cmd *PageItemCommand) PrintLeafItemValue(w io.Writer, pageBytes []byte, in
 	if err != nil {
 		return err
 	}
-	return cmd.writeBytes(w, e.value(), format)
+	return writelnBytes(w, e.value(), format)
 }
 
 // Usage returns the help message.
@@ -625,7 +641,7 @@ func (cmd *PageCommand) Run(args ...string) error {
 	}
 
 	// Read page ids.
-	pageIDs, err := atois(fs.Args()[1:])
+	pageIDs, err := stringToPages(fs.Args()[1:])
 	if err != nil {
 		return err
 	} else if len(pageIDs) == 0 {
@@ -1144,6 +1160,7 @@ func newKeysCommand(m *Main) *KeysCommand {
 func (cmd *KeysCommand) Run(args ...string) error {
 	// Parse flags.
 	fs := flag.NewFlagSet("", flag.ContinueOnError)
+	optionsFormat := fs.String("format", "bytes", "Output format. One of: ascii-encoded|hex|bytes (default: bytes)")
 	help := fs.Bool("h", false, "")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1186,18 +1203,26 @@ func (cmd *KeysCommand) Run(args ...string) error {
 
 		// Iterate over each key.
 		return lastbucket.ForEach(func(key, _ []byte) error {
-			fmt.Fprintln(cmd.Stdout, string(key))
-			return nil
+			return writelnBytes(cmd.Stdout, key, *optionsFormat)
 		})
 	})
 }
 
 // Usage returns the help message.
+// TODO: Use https://pkg.go.dev/flag#FlagSet.PrintDefaults to print supported flags.
 func (cmd *KeysCommand) Usage() string {
 	return strings.TrimLeft(`
 usage: bolt keys PATH [BUCKET...]
 
 Print a list of keys in the given (sub)bucket.
+=======
+
+Additional options include:
+
+	--format
+		Output format. One of: ascii-encoded|hex|bytes (default=bytes)
+
+Print a list of keys in the given bucket.
 `, "\n")
 }
 
@@ -1221,6 +1246,10 @@ func newGetCommand(m *Main) *GetCommand {
 func (cmd *GetCommand) Run(args ...string) error {
 	// Parse flags.
 	fs := flag.NewFlagSet("", flag.ContinueOnError)
+	var parseFormat string
+	var format string
+	fs.StringVar(&parseFormat, "parse-format", "ascii-encoded", "Input format. One of: ascii-encoded|hex (default: ascii-encoded)")
+	fs.StringVar(&format, "format", "bytes", "Output format. One of: ascii-encoded|hex|bytes (default: bytes)")
 	help := fs.Bool("h", false, "")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1231,14 +1260,18 @@ func (cmd *GetCommand) Run(args ...string) error {
 
 	// Require database path, bucket and key.
 	relevantArgs := fs.Args()
-	path, buckets, key := relevantArgs[0], relevantArgs[1:len(relevantArgs)-1], relevantArgs[len(relevantArgs)-1]
+	path, buckets := relevantArgs[0], relevantArgs[1:len(relevantArgs)-1]
+	key, err := parseBytes(relevantArgs[len(relevantArgs)-1], parseFormat)
+	if err != nil {
+		return err
+	}
 	if path == "" {
 		return ErrPathRequired
 	} else if _, err := os.Stat(path); os.IsNotExist(err) {
 		return ErrFileNotFound
 	} else if len(buckets) == 0 {
 		return ErrBucketRequired
-	} else if key == "" {
+	} else if len(key) == 0 {
 		return ErrKeyRequired
 	}
 
@@ -1264,13 +1297,13 @@ func (cmd *GetCommand) Run(args ...string) error {
 		}
 
 		// Find value for given key.
-		val := lastbucket.Get([]byte(key))
+		val := lastbucket.Get(key)
 		if val == nil {
-			return ErrKeyNotFound
+			return fmt.Errorf("Error %w for key: %q hex: \"%x\"", ErrKeyNotFound, key, string(key))
 		}
 
-		fmt.Fprintln(cmd.Stdout, string(val))
-		return nil
+		// TODO: In this particular case, it would be better to not terminate with '\n'
+		return writelnBytes(cmd.Stdout, val, format)
 	})
 }
 
@@ -1280,6 +1313,13 @@ func (cmd *GetCommand) Usage() string {
 usage: bolt get PATH [BUCKET..] KEY
 
 Print the value of the given key in the given (sub)bucket.
+
+Additional options include:
+
+	--format
+		Output format. One of: ascii-encoded|hex|bytes (default=bytes)
+	--parse-format
+		Input format (of key). One of: ascii-encoded|hex (default=ascii-encoded)"
 `, "\n")
 }
 
@@ -1772,9 +1812,9 @@ func isPrintable(s string) bool {
 
 // ReadPage reads page info & full page data from a path.
 // This is not transactionally safe.
-func ReadPage(path string, pageID int) (*page, []byte, error) {
+func ReadPage(path string, pageID uint64) (*page, []byte, error) {
 	// Find page size.
-	pageSize, err := ReadPageSize(path)
+	pageSize, hwm, err := ReadPageAndHWMSize(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read page size: %s", err)
 	}
@@ -1796,46 +1836,62 @@ func ReadPage(path string, pageID int) (*page, []byte, error) {
 
 	// Determine total number of blocks.
 	p := (*page)(unsafe.Pointer(&buf[0]))
+	if p.id != pgid(pageID) {
+		return nil, nil, fmt.Errorf("error: %w due to unexpected page id: %d != %d", ErrCorrupt, p.id, pageID)
+	}
 	overflowN := p.overflow
+	if overflowN >= uint32(hwm)-3 { // we exclude 2 meta pages and the current page.
+		return nil, nil, fmt.Errorf("error: %w, page claims to have %d overflow pages (>=hwm=%d). Interrupting to avoid risky OOM", ErrCorrupt, overflowN, hwm)
+	}
 
 	// Re-read entire page (with overflow) into buffer.
-	buf = make([]byte, (int(overflowN)+1)*pageSize)
+	buf = make([]byte, (uint64(overflowN)+1)*pageSize)
 	if n, err := f.ReadAt(buf, int64(pageID*pageSize)); err != nil {
 		return nil, nil, err
 	} else if n != len(buf) {
 		return nil, nil, io.ErrUnexpectedEOF
 	}
 	p = (*page)(unsafe.Pointer(&buf[0]))
+	if p.id != pgid(pageID) {
+		return nil, nil, fmt.Errorf("error: %w due to unexpected page id: %d != %d", ErrCorrupt, p.id, pageID)
+	}
 
 	return p, buf, nil
 }
 
-// ReadPageSize reads page size a path.
+// ReadPageAndHWMSize reads page size and HWM (id of the last+1 page).
 // This is not transactionally safe.
-func ReadPageSize(path string) (int, error) {
+func ReadPageAndHWMSize(path string) (uint64, pgid, error) {
 	// Open database file.
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer f.Close()
 
 	// Read 4KB chunk.
 	buf := make([]byte, 4096)
 	if _, err := io.ReadFull(f, buf); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 
 	// Read page size from metadata.
 	m := (*meta)(unsafe.Pointer(&buf[PageHeaderSize]))
-	return int(m.pageSize), nil
+	if m.magic != magic {
+		return 0, 0, fmt.Errorf("the meta page has wrong (unexpected) magic")
+	}
+	return uint64(m.pageSize), pgid(m.pgid), nil
 }
 
-// atois parses a slice of strings into integers.
-func atois(strs []string) ([]int, error) {
-	var a []int
+func stringToPage(str string) (uint64, error) {
+	return strconv.ParseUint(str, 10, 64)
+}
+
+// stringToPages parses a slice of strings into page ids.
+func stringToPages(strs []string) ([]uint64, error) {
+	var a []uint64
 	for _, str := range strs {
-		i, err := strconv.Atoi(str)
+		i, err := stringToPage(str)
 		if err != nil {
 			return nil, err
 		}
@@ -1872,7 +1928,7 @@ type meta struct {
 	flags    uint32
 	root     bucket
 	freelist pgid
-	pgid     pgid
+	pgid     pgid // High Water Mark (id of next added page if the file growths)
 	txid     txid
 	checksum uint64
 }
