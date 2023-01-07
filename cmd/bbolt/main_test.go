@@ -11,19 +11,24 @@ import (
 	"strconv"
 	"testing"
 
+	"go.etcd.io/bbolt/internal/btesting"
+
+	"github.com/stretchr/testify/require"
+
 	bolt "go.etcd.io/bbolt"
 	main "go.etcd.io/bbolt/cmd/bbolt"
 )
 
 // Ensure the "info" command can print information about a database.
 func TestInfoCommand_Run(t *testing.T) {
-	db := MustOpen(0666, nil)
-	db.DB.Close()
-	defer db.Close()
+	db := btesting.MustCreateDB(t)
+	db.Close()
+
+	defer requireDBNoChange(t, dbData(t, db.Path()), db.Path())
 
 	// Run the info command.
 	m := NewMain()
-	if err := m.Run("info", db.Path); err != nil {
+	if err := m.Run("info", db.Path()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -35,9 +40,10 @@ func TestStatsCommand_Run_EmptyDatabase(t *testing.T) {
 		t.Skip("system does not use 4KB page size")
 	}
 
-	db := MustOpen(0666, nil)
-	defer db.Close()
-	db.DB.Close()
+	db := btesting.MustCreateDB(t)
+	db.Close()
+
+	defer requireDBNoChange(t, dbData(t, db.Path()), db.Path())
 
 	// Generate expected result.
 	exp := "Aggregate statistics for 0 buckets\n\n" +
@@ -61,7 +67,7 @@ func TestStatsCommand_Run_EmptyDatabase(t *testing.T) {
 
 	// Run the command.
 	m := NewMain()
-	if err := m.Run("stats", db.Path); err != nil {
+	if err := m.Run("stats", db.Path()); err != nil {
 		t.Fatal(err)
 	} else if m.Stdout.String() != exp {
 		t.Fatalf("unexpected stdout:\n\n%s", m.Stdout.String())
@@ -75,8 +81,7 @@ func TestStatsCommand_Run(t *testing.T) {
 		t.Skip("system does not use 4KB page size")
 	}
 
-	db := MustOpen(0666, nil)
-	defer db.Close()
+	db := btesting.MustCreateDB(t)
 
 	if err := db.Update(func(tx *bolt.Tx) error {
 		// Create "foo" bucket.
@@ -114,7 +119,9 @@ func TestStatsCommand_Run(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	db.DB.Close()
+	db.Close()
+
+	defer requireDBNoChange(t, dbData(t, db.Path()), db.Path())
 
 	// Generate expected result.
 	exp := "Aggregate statistics for 3 buckets\n\n" +
@@ -138,7 +145,7 @@ func TestStatsCommand_Run(t *testing.T) {
 
 	// Run the command.
 	m := NewMain()
-	if err := m.Run("stats", db.Path); err != nil {
+	if err := m.Run("stats", db.Path()); err != nil {
 		t.Fatal(err)
 	} else if m.Stdout.String() != exp {
 		t.Fatalf("unexpected stdout:\n\n%s", m.Stdout.String())
@@ -147,8 +154,7 @@ func TestStatsCommand_Run(t *testing.T) {
 
 // Ensure the "buckets" command can print a list of buckets.
 func TestBucketsCommand_Run(t *testing.T) {
-	db := MustOpen(0666, nil)
-	defer db.Close()
+	db := btesting.MustCreateDB(t)
 
 	if err := db.Update(func(tx *bolt.Tx) error {
 		for _, name := range []string{"foo", "bar", "baz"} {
@@ -161,13 +167,15 @@ func TestBucketsCommand_Run(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	db.DB.Close()
+	db.Close()
+
+	defer requireDBNoChange(t, dbData(t, db.Path()), db.Path())
 
 	expected := "bar\nbaz\nfoo\n"
 
 	// Run the command.
 	m := NewMain()
-	if err := m.Run("buckets", db.Path); err != nil {
+	if err := m.Run("buckets", db.Path()); err != nil {
 		t.Fatal(err)
 	} else if actual := m.Stdout.String(); actual != expected {
 		t.Fatalf("unexpected stdout:\n\n%s", actual)
@@ -176,8 +184,7 @@ func TestBucketsCommand_Run(t *testing.T) {
 
 // Ensure the "keys" command can print a list of keys for a bucket.
 func TestKeysCommand_Run(t *testing.T) {
-	db := MustOpen(0666, nil)
-	defer db.Close()
+	db := btesting.MustCreateDB(t)
 
 	if err := db.Update(func(tx *bolt.Tx) error {
 		for _, name := range []string{"foo", "bar"} {
@@ -196,13 +203,15 @@ func TestKeysCommand_Run(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	db.DB.Close()
+	db.Close()
+
+	defer requireDBNoChange(t, dbData(t, db.Path()), db.Path())
 
 	expected := "foo-0\nfoo-1\nfoo-2\n"
 
 	// Run the command.
 	m := NewMain()
-	if err := m.Run("keys", db.Path, "foo"); err != nil {
+	if err := m.Run("keys", db.Path(), "foo"); err != nil {
 		t.Fatal(err)
 	} else if actual := m.Stdout.String(); actual != expected {
 		t.Fatalf("unexpected stdout:\n\n%s", actual)
@@ -211,8 +220,7 @@ func TestKeysCommand_Run(t *testing.T) {
 
 // Ensure the "get" command can print the value of a key in a bucket.
 func TestGetCommand_Run(t *testing.T) {
-	db := MustOpen(0666, nil)
-	defer db.Close()
+	db := btesting.MustCreateDB(t)
 
 	if err := db.Update(func(tx *bolt.Tx) error {
 		for _, name := range []string{"foo", "bar"} {
@@ -232,13 +240,15 @@ func TestGetCommand_Run(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	db.DB.Close()
+	db.Close()
+
+	defer requireDBNoChange(t, dbData(t, db.Path()), db.Path())
 
 	expected := "val-foo-1\n"
 
 	// Run the command.
 	m := NewMain()
-	if err := m.Run("get", db.Path, "foo", "foo-1"); err != nil {
+	if err := m.Run("get", db.Path(), "foo", "foo-1"); err != nil {
 		t.Fatal(err)
 	} else if actual := m.Stdout.String(); actual != expected {
 		t.Fatalf("unexpected stdout:\n\n%s", actual)
@@ -262,32 +272,6 @@ func NewMain() *Main {
 	return m
 }
 
-// MustOpen creates a Bolt database in a temporary location.
-func MustOpen(mode os.FileMode, options *bolt.Options) *DB {
-	// Create temporary path.
-	f, _ := os.CreateTemp("", "bolt-")
-	f.Close()
-	os.Remove(f.Name())
-
-	db, err := bolt.Open(f.Name(), mode, options)
-	if err != nil {
-		panic(err.Error())
-	}
-	return &DB{DB: db, Path: f.Name()}
-}
-
-// DB is a test wrapper for bolt.DB.
-type DB struct {
-	*bolt.DB
-	Path string
-}
-
-// Close closes and removes the database.
-func (db *DB) Close() error {
-	defer os.Remove(db.Path)
-	return db.DB.Close()
-}
-
 func TestCompactCommand_Run(t *testing.T) {
 	var s int64
 	if err := binary.Read(crypto.Reader, binary.BigEndian, &s); err != nil {
@@ -295,11 +279,11 @@ func TestCompactCommand_Run(t *testing.T) {
 	}
 	rand.Seed(s)
 
-	dstdb := MustOpen(0666, nil)
+	dstdb := btesting.MustCreateDB(t)
 	dstdb.Close()
 
 	// fill the db
-	db := MustOpen(0666, nil)
+	db := btesting.MustCreateDB(t)
 	if err := db.Update(func(tx *bolt.Tx) error {
 		n := 2 + rand.Intn(5)
 		for i := 0; i < n; i++ {
@@ -317,7 +301,6 @@ func TestCompactCommand_Run(t *testing.T) {
 		}
 		return nil
 	}); err != nil {
-		db.Close()
 		t.Fatal(err)
 	}
 
@@ -340,7 +323,6 @@ func TestCompactCommand_Run(t *testing.T) {
 		}
 		return nil
 	}); err != nil {
-		db.Close()
 		t.Fatal(err)
 	}
 	if err := db.Update(func(tx *bolt.Tx) error {
@@ -352,29 +334,26 @@ func TestCompactCommand_Run(t *testing.T) {
 		}
 		return tx.DeleteBucket([]byte("large_vals"))
 	}); err != nil {
-		db.Close()
 		t.Fatal(err)
 	}
-	db.DB.Close()
-	defer db.Close()
-	defer dstdb.Close()
+	db.Close()
 
-	dbChk, err := chkdb(db.Path)
+	dbChk, err := chkdb(db.Path())
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	m := NewMain()
-	if err := m.Run("compact", "-o", dstdb.Path, db.Path); err != nil {
+	if err := m.Run("compact", "-o", dstdb.Path(), db.Path()); err != nil {
 		t.Fatal(err)
 	}
 
-	dbChkAfterCompact, err := chkdb(db.Path)
+	dbChkAfterCompact, err := chkdb(db.Path())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	dstdbChk, err := chkdb(dstdb.Path)
+	dstdbChk, err := chkdb(dstdb.Path())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,7 +399,7 @@ func fillBucket(b *bolt.Bucket, prefix []byte) error {
 }
 
 func chkdb(path string) ([]byte, error) {
-	db, err := bolt.Open(path, 0666, nil)
+	db, err := bolt.Open(path, 0666, &bolt.Options{ReadOnly: true})
 	if err != nil {
 		return nil, err
 	}
@@ -452,4 +431,18 @@ func walkBucket(parent *bolt.Bucket, k []byte, v []byte, w io.Writer) error {
 		}
 		return walkBucket(parent, k, v, w)
 	})
+}
+
+func dbData(t *testing.T, filePath string) []byte {
+	data, err := os.ReadFile(filePath)
+	require.NoError(t, err)
+	return data
+}
+
+func requireDBNoChange(t *testing.T, oldData []byte, filePath string) {
+	newData, err := os.ReadFile(filePath)
+	require.NoError(t, err)
+
+	noChange := bytes.Equal(oldData, newData)
+	require.True(t, noChange)
 }
