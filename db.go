@@ -95,6 +95,11 @@ type DB struct {
 	// https://github.com/boltdb/bolt/issues/284
 	NoGrowSync bool
 
+	// When `true`, bbolt will always load the free pages when opening the DB.
+	// When opening db in write mode, this flag will always automatically
+	// set to `true`.
+	PreLoadFreelist bool
+
 	// If you want to read the entire database fast, you can set MmapFlag to
 	// syscall.MAP_POPULATE on Linux 2.6.23+ for sequential read-ahead.
 	MmapFlags int
@@ -196,6 +201,7 @@ func Open(path string, mode os.FileMode, options *Options) (*DB, error) {
 	db.NoGrowSync = options.NoGrowSync
 	db.MmapFlags = options.MmapFlags
 	db.NoFreelistSync = options.NoFreelistSync
+	db.PreLoadFreelist = options.PreLoadFreelist
 	db.FreelistType = options.FreelistType
 	db.Mlock = options.Mlock
 
@@ -208,6 +214,9 @@ func Open(path string, mode os.FileMode, options *Options) (*DB, error) {
 	if options.ReadOnly {
 		flag = os.O_RDONLY
 		db.readOnly = true
+	} else {
+		// always load free pages in write mode
+		db.PreLoadFreelist = true
 	}
 
 	db.openFile = options.OpenFile
@@ -277,11 +286,13 @@ func Open(path string, mode os.FileMode, options *Options) (*DB, error) {
 		return nil, err
 	}
 
+	if db.PreLoadFreelist {
+		db.loadFreelist()
+	}
+
 	if db.readOnly {
 		return db, nil
 	}
-
-	db.loadFreelist()
 
 	// Flush freelist when transitioning from no sync to sync so
 	// NoFreelistSync unaware boltdb can open the db later.
@@ -480,8 +491,19 @@ func (db *DB) mmap(minsz int) error {
 	return nil
 }
 
+func (db *DB) invalidate() {
+	db.dataref = nil
+	db.data = nil
+	db.datasz = 0
+
+	db.meta0 = nil
+	db.meta1 = nil
+}
+
 // munmap unmaps the data file from memory.
 func (db *DB) munmap() error {
+	defer db.invalidate()
+
 	if err := munmap(db); err != nil {
 		return fmt.Errorf("unmap error: " + err.Error())
 	}
@@ -690,6 +712,13 @@ func (db *DB) beginTx() (*Tx, error) {
 		return nil, ErrDatabaseNotOpen
 	}
 
+	// Exit if the database is not correctly mapped.
+	if db.data == nil {
+		db.mmaplock.RUnlock()
+		db.metalock.Unlock()
+		return nil, ErrInvalidMapping
+	}
+
 	// Create a transaction associated with the database.
 	t := &Tx{}
 	t.init(db)
@@ -729,6 +758,12 @@ func (db *DB) beginRWTx() (*Tx, error) {
 	if !db.opened {
 		db.rwlock.Unlock()
 		return nil, ErrDatabaseNotOpen
+	}
+
+	// Exit if the database is not correctly mapped.
+	if db.data == nil {
+		db.rwlock.Unlock()
+		return nil, ErrInvalidMapping
 	}
 
 	// Create a transaction associated with the database.
@@ -1005,6 +1040,7 @@ func (db *DB) Stats() Stats {
 // This is for internal access to the raw data bytes from the C cursor, use
 // carefully, or not at all.
 func (db *DB) Info() *Info {
+	_assert(db.data != nil, "database file isn't correctly mapped")
 	return &Info{uintptr(unsafe.Pointer(&db.data[0])), db.pageSize}
 }
 
@@ -1031,7 +1067,7 @@ func (db *DB) meta() *meta {
 		metaB = db.meta0
 	}
 
-	// Use higher meta page if valid. Otherwise fallback to previous, if valid.
+	// Use higher meta page if valid. Otherwise, fallback to previous, if valid.
 	if err := metaA.validate(); err == nil {
 		return metaA
 	} else if err := metaB.validate(); err == nil {
@@ -1162,6 +1198,11 @@ type Options struct {
 	// Do not sync freelist to disk. This improves the database write performance
 	// under normal operation, but requires a full database re-sync during recovery.
 	NoFreelistSync bool
+
+	// PreLoadFreelist sets whether to load the free pages when opening
+	// the db file. Note when opening db in write mode, bbolt will always
+	// load the free pages.
+	PreLoadFreelist bool
 
 	// FreelistType sets the backend freelist type. There are two options. Array which is simple but endures
 	// dramatic performance degradation if database is large and framentation in freelist is common.
