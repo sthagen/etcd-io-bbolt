@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -212,7 +213,7 @@ func (cmd *checkCommand) Run(args ...string) error {
 	// Perform consistency check.
 	return db.View(func(tx *bolt.Tx) error {
 		var count int
-		for err := range tx.Check(CmdKvStringer()) {
+		for err := range tx.CheckWithOptions(bolt.WithKVStringer(CmdKvStringer())) {
 			fmt.Fprintln(cmd.Stdout, err)
 			count++
 		}
@@ -535,7 +536,7 @@ func formatBytes(b []byte, format string) (string, error) {
 	case "auto":
 		return bytesToAsciiOrHex(b), nil
 	case "redacted":
-		return fmt.Sprintf("<redacted len:%d>", len(b)), nil
+		return fmt.Sprintf("<redacted len:%d sha256:%x>", len(b), sha256.New().Sum(b)), nil
 	default:
 		return "", fmt.Errorf("formatBytes: unsupported format: %s", format)
 	}
@@ -1571,6 +1572,7 @@ type compactCommand struct {
 	SrcPath   string
 	DstPath   string
 	TxMaxSize int64
+	DstNoSync bool
 }
 
 // newCompactCommand returns a CompactCommand.
@@ -1587,6 +1589,7 @@ func (cmd *compactCommand) Run(args ...string) (err error) {
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&cmd.DstPath, "o", "", "")
 	fs.Int64Var(&cmd.TxMaxSize, "tx-max-size", 65536, "")
+	fs.BoolVar(&cmd.DstNoSync, "no-sync", false, "")
 	if err := fs.Parse(args); err == flag.ErrHelp {
 		fmt.Fprintln(cmd.Stderr, cmd.Usage())
 		return ErrUsage
@@ -1619,7 +1622,7 @@ func (cmd *compactCommand) Run(args ...string) (err error) {
 	defer src.Close()
 
 	// Open destination database.
-	dst, err := bolt.Open(cmd.DstPath, fi.Mode(), nil)
+	dst, err := bolt.Open(cmd.DstPath, fi.Mode(), &bolt.Options{NoSync: cmd.DstNoSync})
 	if err != nil {
 		return err
 	}
@@ -1657,6 +1660,10 @@ Additional options include:
 	-tx-max-size NUM
 		Specifies the maximum size of individual transactions.
 		Defaults to 64KB.
+
+	-no-sync BOOL
+		Skip fsync() calls after each commit (fast but unsafe)
+		Defaults to false
 `, "\n")
 }
 
