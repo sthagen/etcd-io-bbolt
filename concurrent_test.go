@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	mrand "math/rand"
 	"os"
 	"path/filepath"
@@ -20,9 +21,9 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	bolt "go.etcd.io/bbolt"
-	"go.etcd.io/bbolt/internal/btesting"
-	"go.etcd.io/bbolt/internal/common"
 )
+
+const noopTxKey string = "%magic-no-op-key%"
 
 type duration struct {
 	min time.Duration
@@ -43,6 +44,7 @@ type concurrentConfig struct {
 	workInterval   duration
 	operationRatio []operationChance
 	readInterval   duration   // only used by readOpeartion
+	noopWriteRatio int        // only used by writeOperation
 	writeBytes     bytesRange // only used by writeOperation
 }
 
@@ -63,7 +65,7 @@ func TestConcurrentReadAndWrite(t *testing.T) {
 	conf := concurrentConfig{
 		workInterval: duration{
 			min: 5 * time.Millisecond,
-			max: 100 * time.Millisecond,
+			max: 10 * time.Millisecond,
 		},
 		operationRatio: []operationChance{
 			{operation: Read, chance: 60},
@@ -74,6 +76,7 @@ func TestConcurrentReadAndWrite(t *testing.T) {
 			min: 50 * time.Millisecond,
 			max: 100 * time.Millisecond,
 		},
+		noopWriteRatio: 20,
 		writeBytes: bytesRange{
 			min: 200,
 			max: 16000,
@@ -139,7 +142,8 @@ func concurrentReadAndWrite(t *testing.T,
 	testDuration time.Duration) {
 
 	t.Log("Preparing db.")
-	db := btesting.MustCreateDB(t)
+	db := mustCreateDB(t, nil)
+	defer db.Close()
 	err := db.Update(func(tx *bolt.Tx) error {
 		_, err := tx.CreateBucket(bucket)
 		return err
@@ -163,14 +167,57 @@ func concurrentReadAndWrite(t *testing.T,
 		testDuration)
 
 	t.Log("Analyzing the history records.")
-	if err := validateSerializable(records); err != nil {
-		t.Errorf("The history records are not serializable:\n %v", err)
+	if err := validateSequential(records); err != nil {
+		t.Errorf("The history records are not sequential:\n %v", err)
+	}
+
+	t.Log("Checking database consistency.")
+	if err := checkConsistency(t, db); err != nil {
+		t.Errorf("The data isn't consistency: %v", err)
 	}
 
 	panicked = false
 	// TODO (ahrtr):
 	//   1. intentionally inject a random failpoint.
-	//   2. check db consistency at the end.
+}
+
+// mustCreateDB is created in place of `btesting.MustCreateDB`, and it's
+// only supposed to be used by the concurrent test case. The purpose is
+// to ensure the test case can be executed on old branches or versions,
+// e.g. `release-1.3` or `1.3.[5-7]`.
+func mustCreateDB(t *testing.T, o *bolt.Options) *bolt.DB {
+	f := filepath.Join(t.TempDir(), "db")
+
+	t.Logf("Opening bbolt DB at: %s", f)
+	if o == nil {
+		o = bolt.DefaultOptions
+	}
+
+	freelistType := bolt.FreelistArrayType
+	if env := os.Getenv("TEST_FREELIST_TYPE"); env == string(bolt.FreelistMapType) {
+		freelistType = bolt.FreelistMapType
+	}
+
+	o.FreelistType = freelistType
+
+	db, err := bolt.Open(f, 0666, o)
+	require.NoError(t, err)
+
+	return db
+}
+
+func checkConsistency(t *testing.T, db *bolt.DB) error {
+	return db.View(func(tx *bolt.Tx) error {
+		cnt := 0
+		for err := range tx.Check() {
+			t.Errorf("Consistency error: %v", err)
+			cnt++
+		}
+		if cnt > 0 {
+			return fmt.Errorf("%d consistency errors found", cnt)
+		}
+		return nil
+	})
 }
 
 /*
@@ -181,7 +228,7 @@ workers, which execute different operations, including `Read`,
 *********************************************************
 */
 func runWorkers(t *testing.T,
-	db *btesting.DB,
+	db *bolt.DB,
 	bucket []byte,
 	keys []string,
 	workerCount int,
@@ -246,7 +293,7 @@ func runWorker(t *testing.T, w *worker, errCh chan error) (historyRecords, error
 
 type worker struct {
 	id int
-	db *btesting.DB
+	db *bolt.DB
 
 	bucket []byte
 	keys   []string
@@ -302,12 +349,12 @@ func (w *worker) pickOperation() OperationType {
 	panic("unexpected")
 }
 
-func executeOperation(op OperationType, db *btesting.DB, bucket []byte, keys []string, conf concurrentConfig) (historyRecord, error) {
+func executeOperation(op OperationType, db *bolt.DB, bucket []byte, keys []string, conf concurrentConfig) (historyRecord, error) {
 	switch op {
 	case Read:
 		return executeRead(db, bucket, keys, conf.readInterval)
 	case Write:
-		return executeWrite(db, bucket, keys, conf.writeBytes)
+		return executeWrite(db, bucket, keys, conf.writeBytes, conf.noopWriteRatio)
 	case Delete:
 		return executeDelete(db, bucket, keys)
 	default:
@@ -315,7 +362,7 @@ func executeOperation(op OperationType, db *btesting.DB, bucket []byte, keys []s
 	}
 }
 
-func executeRead(db *btesting.DB, bucket []byte, keys []string, readInterval duration) (historyRecord, error) {
+func executeRead(db *bolt.DB, bucket []byte, keys []string, readInterval duration) (historyRecord, error) {
 	var rec historyRecord
 	err := db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucket)
@@ -346,10 +393,23 @@ func executeRead(db *btesting.DB, bucket []byte, keys []string, readInterval dur
 	return rec, err
 }
 
-func executeWrite(db *btesting.DB, bucket []byte, keys []string, writeBytes bytesRange) (historyRecord, error) {
+func executeWrite(db *bolt.DB, bucket []byte, keys []string, writeBytes bytesRange, noopWriteRatio int) (historyRecord, error) {
 	var rec historyRecord
 
 	err := db.Update(func(tx *bolt.Tx) error {
+		if mrand.Intn(100) < noopWriteRatio {
+			// A no-op write transaction has two consequences:
+			//    1. The txid increases by 1;
+			//    2. Two meta pages point to the same root page.
+			rec = historyRecord{
+				OperationType: Write,
+				Key:           noopTxKey,
+				Value:         nil,
+				Txid:          tx.ID(),
+			}
+			return nil
+		}
+
 		b := tx.Bucket(bucket)
 
 		selectedKey := keys[mrand.Intn(len(keys))]
@@ -376,7 +436,7 @@ func executeWrite(db *btesting.DB, bucket []byte, keys []string, writeBytes byte
 	return rec, err
 }
 
-func executeDelete(db *btesting.DB, bucket []byte, keys []string) (historyRecord, error) {
+func executeDelete(db *bolt.DB, bucket []byte, keys []string) (historyRecord, error) {
 	var rec historyRecord
 
 	err := db.Update(func(tx *bolt.Tx) error {
@@ -423,7 +483,7 @@ Functions for persisting test data, including db file
 and operation history
 *********************************************************
 */
-func saveDataIfFailed(t *testing.T, db *btesting.DB, rs historyRecords, force bool) {
+func saveDataIfFailed(t *testing.T, db *bolt.DB, rs historyRecords, force bool) {
 	if t.Failed() || force {
 		if err := db.Close(); err != nil {
 			t.Errorf("Failed to close db: %v", err)
@@ -434,12 +494,56 @@ func saveDataIfFailed(t *testing.T, db *btesting.DB, rs historyRecords, force bo
 	}
 }
 
-func backupDB(t *testing.T, db *btesting.DB, path string) {
+func backupDB(t *testing.T, db *bolt.DB, path string) {
 	targetFile := filepath.Join(path, "db.bak")
 	t.Logf("Saving the DB file to %s", targetFile)
-	err := common.CopyFile(db.Path(), targetFile)
+	err := copyFile(db.Path(), targetFile)
 	require.NoError(t, err)
 	t.Logf("DB file saved to %s", targetFile)
+}
+
+func copyFile(srcPath, dstPath string) error {
+	// Ensure source file exists.
+	_, err := os.Stat(srcPath)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("source file %q not found", srcPath)
+	} else if err != nil {
+		return err
+	}
+
+	// Ensure output file not exist.
+	_, err = os.Stat(dstPath)
+	if err == nil {
+		return fmt.Errorf("output file %q already exists", dstPath)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	srcDB, err := os.Open(srcPath)
+	if err != nil {
+		return fmt.Errorf("failed to open source file %q: %w", srcPath, err)
+	}
+	defer srcDB.Close()
+	dstDB, err := os.Create(dstPath)
+	if err != nil {
+		return fmt.Errorf("failed to create output file %q: %w", dstPath, err)
+	}
+	defer dstDB.Close()
+	written, err := io.Copy(dstDB, srcDB)
+	if err != nil {
+		return fmt.Errorf("failed to copy database file from %q to %q: %w", srcPath, dstPath, err)
+	}
+
+	srcFi, err := srcDB.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to get source file info %q: %w", srcPath, err)
+	}
+	initialSize := srcFi.Size()
+	if initialSize != written {
+		return fmt.Errorf("the byte copied (%q: %d) isn't equal to the initial db size (%q: %d)", dstPath, written, srcPath, initialSize)
+	}
+
+	return nil
 }
 
 func persistHistoryRecords(t *testing.T, rs historyRecords, path string) {
@@ -541,7 +645,7 @@ func validateIncrementalTxid(rs historyRecords) error {
 	return nil
 }
 
-func validateSerializable(rs historyRecords) error {
+func validateSequential(rs historyRecords) error {
 	sort.Sort(rs)
 
 	lastWriteKeyValueMap := make(map[string]*historyRecord)
@@ -549,8 +653,10 @@ func validateSerializable(rs historyRecords) error {
 	for _, rec := range rs {
 		if v, ok := lastWriteKeyValueMap[rec.Key]; ok {
 			if rec.OperationType == Write {
-				v.Value = rec.Value
 				v.Txid = rec.Txid
+				if rec.Key != noopTxKey {
+					v.Value = rec.Value
+				}
 			} else if rec.OperationType == Delete {
 				delete(lastWriteKeyValueMap, rec.Key)
 			} else {
@@ -561,7 +667,7 @@ func validateSerializable(rs historyRecords) error {
 				}
 			}
 		} else {
-			if rec.OperationType == Write {
+			if rec.OperationType == Write && rec.Key != noopTxKey {
 				lastWriteKeyValueMap[rec.Key] = &historyRecord{
 					OperationType: Write,
 					Key:           rec.Key,
