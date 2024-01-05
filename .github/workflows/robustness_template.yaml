@@ -30,9 +30,6 @@ jobs:
       - name: test-robustness
         run: |
           set -euo pipefail
+          sudo apt-get install -y dmsetup
 
-          make gofail-enable
-
-          # build bbolt with failpoint
-          go install ./cmd/bbolt
-          sudo -E PATH=$PATH make ROBUSTNESS_TESTFLAGS="--count ${{ inputs.count }} --timeout ${{ inputs.testTimeout }} -failfast" test-robustness
+          ROBUSTNESS_TESTFLAGS="--count ${{ inputs.count }} --timeout ${{ inputs.testTimeout }} -failfast" make test-robustness
