@@ -23,6 +23,8 @@ func NewRootCommand() *cobra.Command {
 		newCheckCommand(),
 		newBucketsCommand(),
 		newInfoCommand(),
+		newCompactCommand(),
+		newStatsCommand(),
 	)
 
 	return rootCmd
