@@ -30,6 +30,8 @@ func NewRootCommand() *cobra.Command {
 		newDumpCommand(),
 		newPageItemCommand(),
 		newPageCommand(),
+		newBenchCommand(),
+		newGetCommand(),
 	)
 
 	return rootCmd

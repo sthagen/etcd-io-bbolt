@@ -13,111 +13,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	bolt "go.etcd.io/bbolt"
 	main "go.etcd.io/bbolt/cmd/bbolt"
-	"go.etcd.io/bbolt/internal/btesting"
 )
-
-// Ensure the "get" command can print the value of a key in a bucket.
-func TestGetCommand_Run(t *testing.T) {
-	testCases := []struct {
-		name          string
-		printable     bool
-		testBucket    string
-		testKey       string
-		expectedValue string
-	}{
-		{
-			name:          "printable data",
-			printable:     true,
-			testBucket:    "foo",
-			testKey:       "foo-1",
-			expectedValue: "val-foo-1\n",
-		},
-		{
-			name:          "non printable data",
-			printable:     false,
-			testBucket:    "bar",
-			testKey:       "100001",
-			expectedValue: hex.EncodeToString(convertInt64IntoBytes(100001)) + "\n",
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			db := btesting.MustCreateDB(t)
-
-			if err := db.Update(func(tx *bolt.Tx) error {
-				b, err := tx.CreateBucket([]byte(tc.testBucket))
-				if err != nil {
-					return err
-				}
-				if tc.printable {
-					val := fmt.Sprintf("val-%s", tc.testKey)
-					if err := b.Put([]byte(tc.testKey), []byte(val)); err != nil {
-						return err
-					}
-				} else {
-					if err := b.Put([]byte(tc.testKey), convertInt64IntoBytes(100001)); err != nil {
-						return err
-					}
-				}
-				return nil
-			}); err != nil {
-				t.Fatal(err)
-			}
-			db.Close()
-
-			defer requireDBNoChange(t, dbData(t, db.Path()), db.Path())
-
-			// Run the command.
-			m := NewMain()
-			if err := m.Run("get", db.Path(), tc.testBucket, tc.testKey); err != nil {
-				t.Fatal(err)
-			}
-			actual := m.Stdout.String()
-			assert.Equal(t, tc.expectedValue, actual)
-		})
-	}
-}
-
-// Ensure the "bench" command runs and exits without errors
-func TestBenchCommand_Run(t *testing.T) {
-	tests := map[string]struct {
-		args []string
-	}{
-		"no-args":    {},
-		"100k count": {[]string{"-count", "100000"}},
-	}
-
-	for name, test := range tests {
-		t.Run(name, func(t *testing.T) {
-			// Run the command.
-			m := NewMain()
-			args := append([]string{"bench"}, test.args...)
-			if err := m.Run(args...); err != nil {
-				t.Fatal(err)
-			}
-
-			stderr := m.Stderr.String()
-			stdout := m.Stdout.String()
-			if !strings.Contains(stderr, "starting write benchmark.") || !strings.Contains(stderr, "starting read benchmark.") {
-				t.Fatal(fmt.Errorf("benchmark result does not contain read/write start output:\n%s", stderr))
-			}
-
-			if strings.Contains(stderr, "iter mismatch") {
-				t.Fatal(fmt.Errorf("found iter mismatch in stdout:\n%s", stderr))
-			}
-
-			if !strings.Contains(stdout, "# Write") || !strings.Contains(stdout, "# Read") {
-				t.Fatal(fmt.Errorf("benchmark result does not contain read/write output:\n%s", stdout))
-			}
-		})
-	}
-}
 
 type ConcurrentBuffer struct {
 	m   sync.Mutex
@@ -160,28 +60,6 @@ func NewMain() *Main {
 	m.Main.Stdout = &m.Stdout
 	m.Main.Stderr = &m.Stderr
 	return m
-}
-
-func TestCommands_Run_NoArgs(t *testing.T) {
-	testCases := []struct {
-		name   string
-		cmd    string
-		expErr error
-	}{
-		{
-			name:   "get",
-			cmd:    "get",
-			expErr: main.ErrNotEnoughArgs,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			m := NewMain()
-			err := m.Run(tc.cmd)
-			require.ErrorIs(t, err, main.ErrNotEnoughArgs)
-		})
-	}
 }
 
 func fillBucket(b *bolt.Bucket, prefix []byte) error {
