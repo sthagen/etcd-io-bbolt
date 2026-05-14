@@ -2,7 +2,7 @@ module go.etcd.io/bbolt
 
 go 1.25.0
 
-toolchain go1.25.9
+toolchain go1.25.10
 
 require (
 	github.com/spf13/cobra v1.10.2
@@ -10,7 +10,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	go.etcd.io/gofail v0.2.0
 	golang.org/x/sync v0.20.0
-	golang.org/x/sys v0.43.0
+	golang.org/x/sys v0.44.0
 )
 
 require (
